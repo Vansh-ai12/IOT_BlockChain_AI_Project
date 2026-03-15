@@ -10,7 +10,14 @@
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {
+    "@helia/unixfs": "^3.0.7",
+    "@iota/iota-sdk": "^1.10.1",
+    "blockstore-core": "^6.1.2",
+    "datastore-core": "^11.0.2",
     "express": "^5.2.1",
+    "helia": "^3.0.1",
+    "multer": "^2.0.2",
+    "node-fetch": "^2.7.0",
     "web3": "^4.16.0"
   }
 }
