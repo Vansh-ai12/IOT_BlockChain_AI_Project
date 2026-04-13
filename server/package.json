@@ -12,10 +12,14 @@
   "dependencies": {
     "@helia/unixfs": "^3.0.7",
     "@iota/iota-sdk": "^1.10.1",
+    "bcryptjs": "^3.0.3",
     "blockstore-core": "^6.1.2",
+    "cors": "^2.8.6",
     "datastore-core": "^11.0.2",
     "express": "^5.2.1",
     "helia": "^3.0.1",
+    "jsonwebtoken": "^9.0.3",
+    "mongoose": "^8.23.0",
     "multer": "^2.0.2",
     "node-fetch": "^2.7.0",
     "web3": "^4.16.0"

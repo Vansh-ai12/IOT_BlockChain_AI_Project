@@ -61,13 +61,12 @@ export default function Home() {
 
         <div className="p-7 border border-[#1f2a23] rounded-lg bg-[#0f1511]">
           <h3 className="text-xl font-semibold text-green-400 mb-3">
-            Real-Time Sensor Telemetry
+            Live readings
           </h3>
 
           <p className="text-gray-400 text-sm leading-relaxed">
-            Continuous ingestion of structural telemetry streams enabling
-            real-time visualization of infrastructure health metrics and
-            device connectivity.
+            Pull in sensor numbers as they arrive and show them on charts and
+            dashboards so you can spot issues early.
           </p>
         </div>
 
