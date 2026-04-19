@@ -88,6 +88,7 @@ async function postSensorThresholdAlerts(rows, headers) {
 export default function SensorData() {
   const [headers, setHeaders] = useState([]);
   const [rows, setRows] = useState([]);
+  const [aiStatus, setAiStatus] = useState("Waiting for signal...");
 
   const [anchoring, setAnchoring] = useState(false);
   const [anchorProgress, setAnchorProgress] = useState(0);
@@ -101,11 +102,21 @@ export default function SensorData() {
     es.addEventListener("newRecord", (evt) => {
       try {
         const rec = JSON.parse(evt.data);
+        if (rec.aiPrediction) {
+          setAiStatus(rec.aiPrediction);
+        }
         if (rec.features) {
-          // If this is the first record, set the headers
-          setHeaders(Object.keys(rec.features));
-          // Prepend the new record to the list
-          setRows((prev) => [rec.features, ...prev].slice(0, 50));
+          const isArray = Array.isArray(rec.features);
+          const latestRow = isArray ? rec.features[rec.features.length - 1] : rec.features;
+          
+          setHeaders(Object.keys(latestRow));
+          
+          if (isArray) {
+            // When receiving a window, use the entire window to make the chart lively
+            setRows(rec.features.reverse().slice(0, 50)); 
+          } else {
+            setRows((prev) => [rec.features, ...prev].slice(0, 50));
+          }
         }
       } catch (err) {
         console.warn("SSE parse error:", err);
@@ -167,22 +178,18 @@ export default function SensorData() {
     const peakVal1 = Math.max(...rows.map((r) => Math.abs(r[activeCol1] || 0)));
     const peakVal2 = Math.max(...rows.map((r) => Math.abs(r[activeCol2] || 0)));
 
-    let status = "Stable";
     let statusColor = "text-green-400";
-    if (peakVal1 > 8 || peakVal2 > 5) {
-      status = "Anomaly Detected";
-      statusColor = "text-red-400";
-    } else if (peakVal1 > 5 || peakVal2 > 2) {
-      status = "High Activity";
-      statusColor = "text-yellow-400";
+    if (aiStatus === "Damaged") {
+      statusColor = "text-red-500";
     }
 
-    return { peakVal1, peakVal2, status, statusColor };
-  }, [rows]);
+    return { peakVal1, peakVal2, status: aiStatus, statusColor };
+  }, [rows, aiStatus]);
 
   const chartPoints = useMemo(() => {
     if (rows.length === 0) return null;
-    const data = rows.slice(0, 30).reverse();
+    // Show all 50 samples from the sliding window for a complete structural profile
+    const data = [...rows].reverse().slice(0, 50); 
     // Channels 24, 25, and 0 for baseline
     const cols = ["24", "25", "0"];
     
@@ -209,8 +216,8 @@ export default function SensorData() {
     <MonitorShell active="sensor-data">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
-          <h1 className="text-3xl font-semibold">Sensor Intelligence</h1>
-          <p className="text-zinc-500 text-sm">Monitoring {headers.length} live data streams from the structure</p>
+          <h1 className="text-3xl font-semibold text-white">Sensor Intelligence</h1>
+          <p className="text-zinc-500 text-sm">Monitoring {headers.length} high-precision data streams from the structure</p>
         </div>
         <Link
           href="/dashboard"
@@ -229,7 +236,7 @@ export default function SensorData() {
           </p>
           <div className="mt-4 flex items-center gap-2 text-xs">
             <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse"></span>
-            <span className="text-zinc-400">AI Engine monitoring Channel 24...</span>
+            <span className="text-zinc-400">AI monitoring Primary Strain (CH-24) for anomalies...</span>
           </div>
         </div>
 
@@ -255,11 +262,11 @@ export default function SensorData() {
           <div className="flex justify-between items-center mb-6">
             <h3 className="text-green-400 font-bold uppercase tracking-widest text-sm flex items-center gap-2">
               <span className="w-2 h-2 rounded-full bg-green-500"></span>
-              Live Signal Waveform
+              Live Signal Waveform (Main Structural Oscillation)
             </h3>
             <div className="flex gap-4 text-[10px] uppercase font-bold">
-              <span className="flex items-center gap-1 text-green-500">Channel 24 (Active)</span>
-              <span className="flex items-center gap-1 text-zinc-700 decoration-line-through">Channel 25 (Ignored)</span>
+              <span className="flex items-center gap-1 text-green-500">Strain Axis (CH-24)</span>
+              <span className="flex items-center gap-1 text-zinc-700 decoration-line-through">Static Axis (CH-0)</span>
             </div>
           </div>
           
@@ -271,7 +278,11 @@ export default function SensorData() {
                 <line x1="0" y1="75" x2="100" y2="75" stroke="#101814" strokeWidth="0.5" />
                 {/* Zero Baseline */}
                 <line x1="0" y1="50" x2="100" y2="50" stroke="#1f2a23" strokeWidth="1" strokeDasharray="4,4" />
-                {/* Path Lines */}
+                
+                {/* Channel 25 (Secondary) */}
+                <polyline points={chartPoints.c25} fill="none" stroke="#2563eb" strokeWidth="1" strokeOpacity="0.5" strokeLinejoin="round" />
+                
+                {/* Channel 24 (Primary) */}
                 <polyline points={chartPoints.c24} fill="none" stroke="#22c55e" strokeWidth="1.5" strokeLinejoin="round" />
               </svg>
             ) : (
@@ -288,7 +299,7 @@ export default function SensorData() {
               <p className="text-xs text-zinc-500 mb-2 font-mono tracking-tighter">DATA SOURCE: Structural Sensors</p>
               <p className="text-[10px] text-zinc-600 leading-relaxed font-medium">
                 We have filtered out redundant noise (Indices 9 and 25). 
-                Channel 24 is being streamed to the IOTA Tangle for immutable auditing.
+                Channel 24 is being streamed to the Immutable Ledger for permanent tracking.
               </p>
             </div>
           </div>
@@ -296,9 +307,29 @@ export default function SensorData() {
           <button
             onClick={anchorAllToBlockchain}
             disabled={anchoring || !rows.length}
-            className="w-full py-4 bg-green-500 text-black font-black uppercase tracking-tighter rounded-lg hover:bg-green-400 disabled:opacity-50 transition-all shadow-[0_0_20px_rgba(34,197,94,0.3)] hover:scale-[1.02] active:scale-95"
+            className="w-full py-4 bg-green-500 text-black font-black uppercase tracking-tighter rounded-lg hover:bg-green-400 disabled:opacity-50 transition-all shadow-[0_0_20px_rgba(34,197,94,0.3)] hover:scale-[1.02] active:scale-95 mb-3"
           >
-            {anchoring ? `SYNCING ${anchorProgress}/${rows.length}` : "Save Batch to Tangle"}
+            {anchoring ? `SYNCING ${anchorProgress}/${rows.length}` : "Sync Signal Records"}
+          </button>
+
+          <button
+            onClick={() => {
+              // PRIVACY FILTER: Remove technical database details
+              const cleanRows = rows.map((row) => {
+                const { _id, proofHash, metadata, createdAt, updatedAt, ...visibleData } = row;
+                return visibleData;
+              });
+              const blob = new Blob([JSON.stringify(cleanRows, null, 2)], { type: "application/json" });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement("a");
+              a.href = url;
+              a.download = `signal_records_${Date.now()}.json`;
+              a.click();
+            }}
+            disabled={!rows.length}
+            className="w-full py-2 bg-zinc-900 text-zinc-400 border border-[#1f2a23] text-[10px] font-bold uppercase tracking-widest rounded-lg hover:bg-zinc-800 transition-all"
+          >
+            Download Signal Log
           </button>
         </div>
       </div>
@@ -315,10 +346,10 @@ export default function SensorData() {
                 <th className="text-left py-4 px-2">Seq ID</th>
                 <th className="text-left py-4 px-2">Status</th>
                 <th className="text-left py-4 px-2">CH-20</th>
-                <th className="text-left py-4 px-2">CH-21</th>
-                <th className="text-left py-4 px-2">CH-22</th>
-                <th className="text-left py-4 px-2">CH-23</th>
-                <th className="text-left py-4 px-2 bg-[#121c15] text-green-400">CH-24 (STRAIN)</th>
+                <th className="text-left py-4 px-2">CH-21 (Vib)</th>
+                <th className="text-left py-4 px-2">CH-22 (Tilt)</th>
+                <th className="text-left py-4 px-2">CH-23 (Tilt)</th>
+                <th className="text-left py-4 px-2 bg-[#121c15] text-green-400">CH-24 (PRIMARY STRAIN)</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-900/50">

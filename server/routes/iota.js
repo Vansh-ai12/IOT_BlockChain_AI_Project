@@ -30,6 +30,11 @@ const sseClients = new Set();
 function sseSend(eventName, payload) {
   const msg =
     `event: ${eventName}\n` + `data: ${JSON.stringify(payload)}\n\n`;
+  
+  if (sseClients.size > 0) {
+    console.log(`📡 SSE: Broadcasting '${eventName}' to ${sseClients.size} clients`);
+  }
+  
   for (const res of sseClients) {
     try {
       res.write(msg);
@@ -41,48 +46,37 @@ function sseSend(eventName, payload) {
 
 router.post("/write-data", async (req, res) => {
   const start = Date.now();
+  console.log(`📥 POST /write-data | Window: ${Array.isArray(req.body.features)} | User: ${req.body.userId}`);
 
   try {
     const { features, userId } = req.body;
 
-    if (!features || typeof features !== "object") {
-      return res.status(400).json({ error: "features (object) required" });
+    if (!features) {
+      return res.status(400).json({ error: "features (object or array) required" });
     }
+
+    // Support both single-row (object) and window (array of objects)
+    const isWindowMode = Array.isArray(features);
+    
+    // Inject a nonce/timestamp to ensure every hash is unique even if data is repeating
+    // This makes the dashboard "lively" with fresh records.
+    const now = Date.now();
+    if (isWindowMode) {
+      features.forEach(row => { row._nonce = now; });
+    } else {
+      features._nonce = now;
+    }
+
+    // For hashing/storage use the full payload
+    // For alert checks use only the most recent row
+    const latestRow = isWindowMode ? features[features.length - 1] : features;
 
     const hash = crypto
       .createHash("sha256")
       .update(JSON.stringify(features))
       .digest("hex");
 
-    // --- DEDUPLICATION CHECK ---
-    const existingRecord = await BlockchainRecord.findOne({ proofHash: hash });
-    if (existingRecord) {
-      if (req.body.progress) {
-        sseSend("simulationProgress", {
-          fileName: req.body.fileName,
-          ...req.body.progress
-        });
-      }
-
-      // Still notify UI of activity even if already anchored
-      sseSend("newRecord", { 
-        ...existingRecord.toObject(), 
-        isDuplicate: true,
-        // We can pass the current time as the activity timestamp
-        activeAt: new Date() 
-      });
-
-      return res.json({
-        success: true,
-        message: "Data already anchored. Returning existing record.",
-        record: existingRecord,
-        proofHash: hash,
-        transactionDigest: existingRecord.transactionDigest,
-        performance: {
-          status: "ALREADY_EXISTS",
-        },
-      });
-    }
+    console.log(`🔍 Data Hashed: ${hash.slice(0, 8)}...`);
 
     const payloadSize = calculateSize(features);
 
@@ -116,53 +110,111 @@ router.post("/write-data", async (req, res) => {
 
     const totalTime = Date.now() - start;
 
-    // --- STORAGE: Persist for Blockchain Records history ---
-    const record = await BlockchainRecord.create({
-      userId: userId || "SYSTEM_SIMULATOR",
-      features,
-      proofHash: hash,
-      transactionDigest: transactionDigest,
-      payloadSizeBytes: payloadSize,
-      blockchainTime
-    });
+    // Compute window range for storage
+    const progress = req.body.progress || null;
+    const windowStart = isWindowMode ? (progress ? progress.current - 49 : 1) : null;
+    const windowEnd   = isWindowMode ? (progress ? progress.current : null) : null;
 
-    // --- ALERTS TRIGGER ---
+    // --- STORAGE & DEDUPLICATION ---
+    let record;
+    console.log(`💾 Attempting storage | Hash: ${hash.slice(0, 8)}...`);
+    const existing = await BlockchainRecord.findOne({ proofHash: hash });
+    
+    if (existing) {
+      console.log(`♻️  Found existing record #${existing._id.toString().slice(-4)} | Updating...`);
+      existing.updatedAt = new Date();
+      existing.windowStart = windowStart;
+      existing.windowEnd = windowEnd;
+      existing.features = features; 
+      record = await existing.save();
+      record = record.toObject();
+      record.isDuplicate = true;
+    } else {
+      console.log(`✨ Creating NEW record...`);
+      const docFields = {
+        features,
+        proofHash: hash,
+        transactionDigest: transactionDigest,
+        payloadSizeBytes: payloadSize,
+        blockchainTimeMs: blockchainTime,
+        totalTimeMs: Date.now() - start,
+        windowStart,
+        windowEnd,
+      };
+      
+      // Only set userId if it's explicitly provided and valid
+      if (userId && userId !== "SYSTEM_SIMULATOR") {
+         docFields.userId = userId;
+      }
+
+      record = await BlockchainRecord.create(docFields);
+      record = record.toObject();
+      record.isDuplicate = false;
+    }
+    console.log(`✅ Storage success | Record ID: ${record._id}`);
+
+    // --- AI MODEL INFERENCE & ALERTS ---
+    let aiPrediction = "Undamaged";
+    let aiScore = 0.0;
     try {
-      const alertsRouter = require("./alerts");
-      if (typeof alertsRouter.createAlertFromServer === "function") {
-        const thresholds = [
-          { key: "vibration", max: 70, severity: "High", title: "High vibration" },
-          { key: "strain", max: 55, severity: "Medium", title: "Elevated strain" },
-          { key: "tilt", max: 25, severity: "Medium", title: "Elevated tilt" },
-        ];
-        for (const t of thresholds) {
-          const v = features[t.key];
-          if (typeof v === "number" && v > t.max) {
+      if (isWindowMode && features.length === 50) {
+        // Build an array of 50 rows x 24 features for the AI Model
+        const rawMatrix = features.map(row => {
+          const rowArray = [];
+          for (let c = 0; c < 24; c++) {
+            rowArray.push(Number(row[c.toString()]) || 0.0);
+          }
+          return rowArray;
+        });
+
+        // Query the FastAPI TensorFlow Model
+        const aiRes = await fetch("http://localhost:8000/predict", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ data: rawMatrix })
+        });
+
+        if (aiRes.ok) {
+          const aiData = await aiRes.json();
+          aiPrediction = aiData.prediction || "Undamaged";
+          aiScore = aiData.score || 0.0;
+
+          // Generate a live Alert/Report for EVERY single window to provide a continuous stream
+          const alertsRouter = require("./alerts");
+          // Generate an entry for EVERY single window to provide a continuous result stream
+          if (typeof alertsRouter.createAlertFromServer === "function") {
             await alertsRouter.createAlertFromServer({
-              title: t.title,
-              message: `${t.key}=${v} exceeded threshold.`,
-              location: "Blockchain pipeline",
-              severity: t.severity,
-              source: "blockchain",
-              metadata: { features, proofHash: hash, transactionDigest },
+              title: aiPrediction, // Directly use "Damaged" or "Undamaged" as the title
+              message: `Stacked LSTM-CNN Evaluation (Score: ${(aiScore * 100).toFixed(1)}%)`,
+              location: "Structural Floor",
+              severity: aiPrediction === "Damaged" ? "High" : "Low",
+              source: "prediction",
+              metadata: { aiScore, aiPrediction, proofHash: hash, transactionDigest },
               relatedBlockchainRecordId: record._id,
             });
           }
         }
       }
-    } catch (alertErr) {
-      console.error("Alert trigger failed:", alertErr.message);
+    } catch (aiErr) {
+      console.error("AI Inference failed:", aiErr.message);
     }
 
     // --- REALTIME BROADCAST ---
-    if (req.body.progress) {
+    if (progress) {
       sseSend("simulationProgress", {
         fileName: req.body.fileName,
-        ...req.body.progress
+        ...progress
       });
     }
 
-    sseSend("newRecord", record);
+    // Broadcast record with window range AND live AI prediction to update UI
+    sseSend("newRecord", {
+      ...record,
+      aiPrediction,
+      activeAt: record.updatedAt || new Date(),
+      windowStart,
+      windowEnd,
+    });
 
     const performance = {
       totalTime: Date.now() - start,
@@ -191,8 +243,9 @@ router.get("/records", async (req, res) => {
     const offset = Math.max(Number(req.query.offset || 0), 0);
 
     const totalCount = await BlockchainRecord.countDocuments({});
+    // CRITICAL FIX: Sort by updatedAt so dupes (updated today) show at the top
     const records = await BlockchainRecord.find({})
-      .sort({ createdAt: -1 })
+      .sort({ updatedAt: -1 })
       .skip(offset)
       .limit(limit)
       .lean();
@@ -204,18 +257,20 @@ router.get("/records", async (req, res) => {
 });
 
 router.get("/records/stream", async (req, res) => {
-  // SSE headers
+  // Robust SSE headers with explicit CORS
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache, no-transform",
-    Connection: "keep-alive",
+    "Connection": "keep-alive",
+    "Access-Control-Allow-Origin": "*",
+    "X-Accel-Buffering": "no", // For Nginx if present
   });
   res.write("\n");
 
   sseClients.add(res);
+  console.log(`🔌 New SSE client connected. Total: ${sseClients.size}`);
 
-  // tell client we're alive
-  res.write(`event: ready\ndata: {}\n\n`);
+  res.write(`event: ready\ndata: {"connected": true}\n\n`);
 
   const heartbeat = setInterval(() => {
     try {
@@ -223,11 +278,12 @@ router.get("/records/stream", async (req, res) => {
     } catch {
       // ignore
     }
-  }, 25000);
+  }, 15000);
 
   req.on("close", () => {
     clearInterval(heartbeat);
     sseClients.delete(res);
+    console.log(`🔌 SSE client disconnected. Total: ${sseClients.size}`);
   });
 });
 
@@ -393,6 +449,41 @@ router.post("/benchmark", async (req, res) => {
       success: false,
       error: error.message,
     });
+  }
+});
+      
+router.get("/performance-stats", async (req, res) => {
+  try {
+    const stats = await BlockchainRecord.aggregate([
+      {
+        $group: {
+          _id: null,
+          avgBlockchainTime: { $avg: "$blockchainTimeMs" },
+          maxBlockchainTime: { $max: "$blockchainTimeMs" },
+          minBlockchainTime: { $min: "$blockchainTimeMs" },
+          avgTotalTime: { $avg: "$totalTimeMs" },
+          totalTransactions: { $sum: 1 },
+          totalPayloadSize: { $sum: "$payloadSizeBytes" },
+        },
+      },
+    ]);
+
+    const recentRecords = await BlockchainRecord.find()
+      .sort({ createdAt: -1 })
+      .limit(20)
+      .select("blockchainTimeMs totalTimeMs payloadSizeBytes createdAt");
+
+    res.json({
+      success: true,
+      summary: stats[0] || {
+        avgBlockchainTime: 0,
+        avgTotalTime: 0,
+        totalTransactions: 0,
+      },
+      recent: recentRecords,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 

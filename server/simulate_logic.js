@@ -58,38 +58,47 @@ async function processDatasetFile(fileName) {
   }
 
   const headers = lines[0].split(",").map((h) => h.trim());
+  
+  // Implementing SLIDING WINDOW (1-50, 2-51, etc.)
+  const WINDOW_SIZE = 50;
   let maxAmpFound = 0;
+  
+  for (let i = 1; i <= lines.length - WINDOW_SIZE; i++) {
+    const windowRows = [];
+    for (let j = 0; j < WINDOW_SIZE; j++) {
+      const values = lines[i + j].split(",").map((v) => v.trim());
+      const row = {};
+      headers.forEach((h, idx) => {
+        const val = values[idx];
+        row[h] = isNaN(val) ? val : parseFloat(val);
+      });
+      windowRows.push(row);
+    }
 
-  for (let i = 1; i < lines.length; i++) {
-    const values = lines[i].split(",").map((v) => v.trim());
-    const features = {};
-    headers.forEach((h, idx) => {
-      const val = values[idx];
-      features[h] = isNaN(val) ? val : parseFloat(val);
-      
-      // Basic heuristic for max amplitude (Ch 24)
-      if (h === "24") maxAmpFound = Math.max(maxAmpFound, Math.abs(parseFloat(val) || 0));
-    });
+    // Latest features (the 50th row in the window) for monitoring
+    const latestFeatures = windowRows[WINDOW_SIZE - 1];
+    maxAmpFound = Math.max(maxAmpFound, Math.abs(latestFeatures["24"] || 0));
 
-    console.log(`[Simulator] ${fileName} -> Row ${i}/${lines.length-1}`);
+    console.log(`[Simulator] ${fileName} -> Window ${i} to ${i + WINDOW_SIZE - 1}`);
 
     try {
       await fetch(API_ENDPOINT, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ 
-          features,
+          features: windowRows, // Sending the whole window
           userId: "SYSTEM_SIMULATOR",
           fileName,
+          _t: Date.now(), // Unique transmission timestamp to ensure fresh hash every time
           progress: {
-            current: i,
+            current: i + WINDOW_SIZE - 1,
             total: lines.length - 1
           }
         }),
       });
-      console.log(`✅ [Simulator] Sent Row ${i}/${lines.length-1}`);
+      console.log(`✅ [Simulator] Sent Window ${i}-${i + WINDOW_SIZE - 1}`);
     } catch (err) {
-      console.error(`❌ Row ${i} error:`, err.message);
+      console.error(`❌ Window ${i} error:`, err.message);
     }
 
     // Wait for the interval

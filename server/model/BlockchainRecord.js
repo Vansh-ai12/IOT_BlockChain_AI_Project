@@ -26,6 +26,22 @@ const blockchainRecordSchema = new mongoose.Schema(
       type: Number,
       required: true,
     },
+    blockchainTimeMs: {
+      type: Number,
+      required: false,
+    },
+    totalTimeMs: {
+      type: Number,
+      required: false,
+    },
+    windowStart: {
+      type: Number,
+      required: false,
+    },
+    windowEnd: {
+      type: Number,
+      required: false,
+    },
   },
   { timestamps: true },
 );
